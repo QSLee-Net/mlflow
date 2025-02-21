@@ -613,9 +613,9 @@ def safe_patch(
                 if is_testing() and not preexisting_run_for_testing:
                     # If an MLflow run was created during the execution of patch code, verify that
                     # it is no longer active and that it contains expected autologging tags
-                    assert (
-                        not mlflow.active_run()
-                    ), f"Autologging integration {autologging_integration} leaked an active run"
+                    assert not mlflow.active_run(), (
+                        f"Autologging integration {autologging_integration} leaked an active run"
+                    )
                     if patch_function_run_for_testing:
                         _validate_autologging_run(
                             autologging_integration, patch_function_run_for_testing.info.run_id
@@ -701,15 +701,6 @@ def revert_patches(autologging_integration):
         gorilla.revert(patch)
 
     _AUTOLOGGING_PATCHES.pop(autologging_integration, None)
-
-
-def is_langchain_callbacks_manager(callbacks):
-    try:
-        from langchain_core.callbacks.base import BaseCallbackManager
-    except ImportError:
-        return False
-
-    return isinstance(callbacks, BaseCallbackManager)
 
 
 # Represents an active autologging session using two fields:
@@ -821,9 +812,9 @@ def _validate_autologging_run(autologging_integration, run_id):
         f"Autologging run with id {run_id} failed to set autologging tag with expected value. "
         f"Expected: '{autologging_integration}', Actual: '{autologging_tag_value}'"
     )
-    assert RunStatus.is_terminated(
-        RunStatus.from_string(run.info.status)
-    ), f"Autologging run with id {run_id} has a non-terminal status '{run.info.status}'"
+    assert RunStatus.is_terminated(RunStatus.from_string(run.info.status)), (
+        f"Autologging run with id {run_id} has a non-terminal status '{run.info.status}'"
+    )
 
 
 class ValidationExemptArgument(typing.NamedTuple):
@@ -987,9 +978,9 @@ def _validate_args(
         autologging_call_input, user_call_input
     ):
         length_diff = len(autologging_call_input) - len(user_call_input)
-        assert (
-            length_diff >= 0
-        ), f"{length_diff} expected inputs are missing from the call to the original function."
+        assert length_diff >= 0, (
+            f"{length_diff} expected inputs are missing from the call to the original function."
+        )
 
     def _assert_autologging_input_kwargs_are_superset(autologging_call_input, user_call_input):
         assert set(user_call_input.keys()).issubset(set(autologging_call_input.keys())), (
@@ -1022,10 +1013,10 @@ def _validate_args(
             _validate_new_input(autologging_call_input)
             return
 
-        assert type(autologging_call_input) == type(
-            user_call_input
-        ), "Type of input to original function '{}' does not match expected type '{}'".format(
-            type(autologging_call_input), type(user_call_input)
+        assert type(autologging_call_input) == type(user_call_input), (
+            "Type of input to original function '{}' does not match expected type '{}'".format(
+                type(autologging_call_input), type(user_call_input)
+            )
         )
 
         if type(autologging_call_input) in [list, tuple]:
@@ -1041,15 +1032,7 @@ def _validate_args(
             _assert_autologging_input_kwargs_are_superset(autologging_call_input, user_call_input)
             for key in autologging_call_input.keys():
                 _validate(autologging_call_input[key], user_call_input.get(key, None))
-        # NB: For LangChain autologging, we replace the callback manager that is passed by
-        # the user with the one we copied and injected our callbacks into. We cannot do this
-        # in-place to avoid side-effects, so create a new callback manager instance. It will
-        # fail at the strict equality check below, so we instead check that their handlers
-        # are effectively the compatible.
-        elif is_langchain_callbacks_manager(
-            autologging_call_input
-        ) and is_langchain_callbacks_manager(user_call_input):
-            _validate(autologging_call_input.handlers, user_call_input.handlers)
+
         else:
             assert (
                 autologging_call_input is user_call_input

@@ -1,4 +1,5 @@
 import datetime
+import importlib
 import json
 import os
 import sys
@@ -25,9 +26,12 @@ from mlflow.environment_variables import _MLFLOW_IS_IN_SERVING_ENVIRONMENT
 from mlflow.exceptions import MlflowException
 from mlflow.models import convert_input_example_to_serving_input
 from mlflow.models.signature import _extract_type_hints, infer_signature
+from mlflow.pyfunc.model import ChatAgent, ChatModel, _FunctionPythonModel
 from mlflow.pyfunc.scoring_server import CONTENT_TYPE_JSON
 from mlflow.pyfunc.utils import pyfunc
 from mlflow.pyfunc.utils.environment import _simulate_serving_environment
+from mlflow.types.agent import ChatAgentMessage, ChatAgentResponse, ChatContext
+from mlflow.types.llm import ChatMessage, ChatParams
 from mlflow.types.schema import AnyType, Array, ColSpec, DataType, Map, Object, Property, Schema
 from mlflow.types.type_hints import TypeFromExample
 from mlflow.utils.env_manager import VIRTUALENV
@@ -567,7 +571,8 @@ def test_functional_python_model_only_output_type_hints():
         model_info = mlflow.pyfunc.log_model(
             "model", python_model=python_model, input_example=["a"]
         )
-    assert model_info.signature is None
+    assert model_info.signature.inputs == Schema([ColSpec(type=DataType.string)])
+    assert model_info.signature.outputs == Schema([ColSpec(type=DataType.string, name=0)])
 
 
 class CallableObject:
@@ -947,6 +952,22 @@ def assert_equal(data1, data2):
         assert data1 == data2
 
 
+def _type_from_example_models():
+    class Model(mlflow.pyfunc.PythonModel):
+        def predict(self, model_input: TypeFromExample):
+            return model_input
+
+    def predict(model_input: TypeFromExample):
+        return model_input
+
+    return [Model(), predict]
+
+
+@pytest.fixture(params=_type_from_example_models())
+def type_from_example_model(request):
+    return request.param
+
+
 @pytest.mark.parametrize(
     "input_example",
     [
@@ -963,18 +984,16 @@ def assert_equal(data1, data2):
         pd.DataFrame({"a": [1, 2, 3], "b": ["x", "y", "z"]}),
     ],
 )
-def test_type_hint_from_example(input_example):
-    class Model(mlflow.pyfunc.PythonModel):
-        def predict(self, model_input: TypeFromExample):
-            return model_input
-
-    model = Model()
-    assert_equal(model.predict(input_example), input_example)
+def test_type_hint_from_example(input_example, type_from_example_model):
+    if callable(type_from_example_model):
+        assert_equal(type_from_example_model(input_example), input_example)
+    else:
+        assert_equal(type_from_example_model.predict(input_example), input_example)
 
     with mlflow.start_run():
         with mock.patch("mlflow.models.model._logger.warning") as mock_warning:
             model_info = mlflow.pyfunc.log_model(
-                "model", python_model=model, input_example=input_example
+                "model", python_model=type_from_example_model, input_example=input_example
             )
         assert not any(
             "Failed to validate serving input example" in call[0][0]
@@ -999,6 +1018,21 @@ def test_type_hint_from_example(input_example):
         )
     else:
         assert_equal(json.loads(scoring_response.content)["predictions"], input_example)
+
+
+def test_type_hint_from_example_invalid_input(type_from_example_model):
+    with mlflow.start_run():
+        with mock.patch("mlflow.models.model._logger.warning") as mock_warning:
+            model_info = mlflow.pyfunc.log_model(
+                "model", python_model=type_from_example_model, input_example=[1, 2, 3]
+            )
+        assert not any(
+            "Failed to validate serving input example" in call[0][0]
+            for call in mock_warning.call_args_list
+        )
+    pyfunc_model = mlflow.pyfunc.load_model(model_info.model_uri)
+    with pytest.raises(MlflowException, match="Failed to enforce schema of data"):
+        pyfunc_model.predict(["1", "2", "3"])
 
 
 @pytest.mark.skipif(
@@ -1044,3 +1078,45 @@ def test_python_model_without_type_hint_warning():
     with mlflow.start_run():
         with pytest.warns(UserWarning, match=msg):
             mlflow.pyfunc.log_model("model", python_model=predict, input_example="abc")
+
+
+@mock.patch("mlflow.pyfunc.utils.data_validation.color_warning")
+def test_type_hint_warning_not_shown_for_builtin_subclasses(mock_warning):
+    # Class outside "mlflow" module should warn
+    class PythonModelWithoutTypeHint(mlflow.pyfunc.PythonModel):
+        def predict(self, model_input, params=None):
+            return model_input
+
+    assert mock_warning.call_count == 1
+    assert "Add type hints to the `predict` method" in mock_warning.call_args[0][0]
+    mock_warning.reset_mock()
+
+    # Class inside "mlflow" module should not warn
+    ChatModel.__init_subclass__()
+    assert mock_warning.call_count == 0
+
+    _FunctionPythonModel.__init_subclass__()
+    assert mock_warning.call_count == 0
+
+    # Check import does not trigger any warning (from builtin sub-classes)
+    importlib.reload(mlflow.pyfunc.model)
+    assert mock_warning.call_count == 0
+
+    # Subclass of ChatModel should not warn (exception to the rule)
+    class ChatModelSubclass(ChatModel):
+        def predict(self, model_input: list[ChatMessage], params: Optional[ChatParams] = None):
+            return model_input
+
+    assert mock_warning.call_count == 0
+
+    # Subclass of ChatAgent should not warn as well (valid pydantic type hint)
+    class SimpleChatAgent(ChatAgent):
+        def predict(
+            self,
+            messages: list[ChatAgentMessage],
+            context: Optional[ChatContext] = None,
+            custom_inputs: Optional[dict[str, Any]] = None,
+        ) -> ChatAgentResponse:
+            pass
+
+    assert mock_warning.call_count == 0
