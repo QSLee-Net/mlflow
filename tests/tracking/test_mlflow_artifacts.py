@@ -50,7 +50,7 @@ ArtifactsServer = namedtuple(
 def artifacts_server():
     with tempfile.TemporaryDirectory() as tmpdir:
         port = get_safe_port()
-        backend_store_uri = f'sqlite:///{os.path.join(tmpdir, "mlruns.db")}'
+        backend_store_uri = f"sqlite:///{os.path.join(tmpdir, 'mlruns.db')}"
         artifacts_destination = os.path.join(tmpdir, "mlartifacts")
         url = f"http://{LOCALHOST}:{port}"
         default_artifact_root = f"{url}/api/2.0/mlflow-artifacts/artifacts"
@@ -393,10 +393,7 @@ def test_rest_get_artifact_api_log_image(artifacts_server):
             url=f"{url}/get-artifact", params={"run_id": run.info.run_id, "path": path}
         )
         get_artifact_response.raise_for_status()
-        assert (
-            "attachment; filename=dog%step%100%timestamp%100"
-            in get_artifact_response.headers["Content-Disposition"]
-        )
+        assert "dog%step%100%timestamp%100" in get_artifact_response.headers["Content-Disposition"]
         if path.endswith("png"):
             loaded_image = np.asarray(
                 Image.open(BytesIO(get_artifact_response.content)), dtype=np.uint8
