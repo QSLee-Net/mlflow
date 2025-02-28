@@ -17,6 +17,7 @@ from clint.config import Config
 PARAM_REGEX = re.compile(r"\s+:param\s+\w+:", re.MULTILINE)
 RETURN_REGEX = re.compile(r"\s+:returns?:", re.MULTILINE)
 DISABLE_COMMENT_REGEX = re.compile(r"clint:\s*disable=([a-z0-9-]+)")
+MARKDOWN_LINK_RE = re.compile(r"\[.+\]\(.+\)")
 
 
 def ignore_map(code: str) -> dict[str, set[int]]:
@@ -277,11 +278,14 @@ class Linter(ast.NodeVisitor):
     def visit_ClassDef(self, node: ast.ClassDef) -> None:
         self.stack.append(node)
         self._no_rst(node)
+        self._syntax_error_example(node)
         self._mlflow_class_name(node)
         self.generic_visit(node)
         self.stack.pop()
 
-    def _syntax_error_example(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+    def _syntax_error_example(
+        self, node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef
+    ) -> None:
         if docstring_node := self._docstring(node):
             for code_block in _iter_code_blocks(docstring_node.value):
                 try:
@@ -323,10 +327,16 @@ class Linter(ast.NodeVisitor):
 
         self.generic_visit(node)
 
+    def _markdown_link(self, node: ast.FunctionDef | ast.AsyncFunctionDef) -> None:
+        if docstring := self._docstring(node):
+            if MARKDOWN_LINK_RE.search(docstring.s):
+                self._check(docstring, rules.MarkdownLink())
+
     def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
         self._test_name_typo(node)
         self._syntax_error_example(node)
         self._param_mismatch(node)
+        self._markdown_link(node)
         self._invalid_abstract_method(node)
 
         for arg in node.args.args + node.args.kwonlyargs + node.args.posonlyargs:
@@ -345,6 +355,7 @@ class Linter(ast.NodeVisitor):
         self._test_name_typo(node)
         self._syntax_error_example(node)
         self._param_mismatch(node)
+        self._markdown_link(node)
         self._invalid_abstract_method(node)
         self.stack.append(node)
         self._no_rst(node)
