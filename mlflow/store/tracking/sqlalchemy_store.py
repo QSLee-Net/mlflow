@@ -87,6 +87,7 @@ from mlflow.utils.validation import (
     _validate_batch_log_data,
     _validate_batch_log_limits,
     _validate_dataset_inputs,
+    _validate_experiment_artifact_location_length,
     _validate_experiment_name,
     _validate_experiment_tag,
     _validate_metric,
@@ -267,6 +268,7 @@ class SqlAlchemyStore(AbstractStore):
         _validate_experiment_name(name)
         if artifact_location:
             artifact_location = resolve_uri_if_local(artifact_location)
+            _validate_experiment_artifact_location_length(artifact_location)
         with self.ManagedSessionMaker() as session:
             try:
                 creation_time = get_current_time_millis()
@@ -1335,7 +1337,7 @@ class SqlAlchemyStore(AbstractStore):
                 stmt = stmt.join(non_attr_filter)
             for idx, dataset_filter in enumerate(dataset_filters):
                 # need to reference the anon table in the join condition
-                anon_table_name = f"anon_{idx+1}"
+                anon_table_name = f"anon_{idx + 1}"
                 stmt = stmt.join(
                     dataset_filter,
                     text(f"runs.run_uuid = {anon_table_name}.destination_id"),
@@ -1651,16 +1653,23 @@ class SqlAlchemyStore(AbstractStore):
                 session.merge(SqlTraceTag(request_id=request_id, key=k, value=v))
             return sql_trace_info.to_mlflow_entity()
 
-    def get_trace_info(self, request_id) -> TraceInfo:
+    def get_trace_info(self, request_id, should_query_v3: bool = False) -> TraceInfo:
         """
         Fetch the trace info for the given request id.
 
         Args:
             request_id: Unique string identifier of the trace.
+            should_query_v3: If True, the backend store will query the V3 API for the trace info.
+                TODO: Remove this flag once the V3 API is the default in OSS.
 
         Returns:
             The TraceInfo object.
         """
+        if should_query_v3:
+            raise MlflowException.invalid_parameter_value(
+                "GetTraceInfoV3 API is not supported in the FileStore backend.",
+            )
+
         with self.ManagedSessionMaker() as session:
             sql_trace_info = self._get_sql_trace_info(session, request_id)
             return sql_trace_info.to_mlflow_entity()
