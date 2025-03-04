@@ -32,6 +32,13 @@ import contextlib
 from mlflow.version import VERSION
 
 __version__ = VERSION
+
+import mlflow.mismatch
+
+# `check_version_mismatch` must be called here before importing any other modules
+with contextlib.suppress(Exception):
+    mlflow.mismatch._check_version_mismatch()
+
 from mlflow import (
     artifacts,  # noqa: F401
     client,  # noqa: F401
@@ -75,7 +82,6 @@ paddle = LazyLoader("mlflow.paddle", globals(), "mlflow.paddle")
 pmdarima = LazyLoader("mlflow.pmdarima", globals(), "mlflow.pmdarima")
 promptflow = LazyLoader("mlflow.promptflow", globals(), "mlflow.promptflow")
 prophet = LazyLoader("mlflow.prophet", globals(), "mlflow.prophet")
-promptlab = LazyLoader("mlflow.promptlab", globals(), "mlflow.promptlab")
 pyfunc = LazyLoader("mlflow.pyfunc", globals(), "mlflow.pyfunc")
 pyspark = LazyLoader("mlflow.pyspark", globals(), "mlflow.pyspark")
 pytorch = LazyLoader("mlflow.pytorch", globals(), "mlflow.pytorch")
@@ -92,6 +98,8 @@ spacy = LazyLoader("mlflow.spacy", globals(), "mlflow.spacy")
 spark = LazyLoader("mlflow.spark", globals(), "mlflow.spark")
 statsmodels = LazyLoader("mlflow.statsmodels", globals(), "mlflow.statsmodels")
 tensorflow = LazyLoader("mlflow.tensorflow", globals(), "mlflow.tensorflow")
+# TxtAI integration is defined at https://github.com/neuml/mlflow-txtai
+txtai = LazyLoader("mlflow.txtai", globals(), "mlflow_txtai")
 transformers = LazyLoader("mlflow.transformers", globals(), "mlflow.transformers")
 xgboost = LazyLoader("mlflow.xgboost", globals(), "mlflow.xgboost")
 
@@ -118,18 +126,30 @@ from mlflow.exceptions import MlflowException
 from mlflow.models import evaluate
 from mlflow.models.evaluation.validation import validate_evaluation_results
 from mlflow.projects import run
+from mlflow.tracing.assessment import (
+    delete_expectation,
+    delete_feedback,
+    log_expectation,
+    log_feedback,
+    update_expectation,
+    update_feedback,
+)
 from mlflow.tracing.fluent import (
     add_trace,
     get_current_active_span,
     get_last_active_trace,
     get_trace,
+    log_trace,
     search_traces,
     start_span,
     trace,
     update_current_trace,
 )
 from mlflow.tracking._model_registry.fluent import (
+    delete_prompt,
+    load_prompt,
     register_model,
+    register_prompt,
     search_model_versions,
     search_registered_models,
 )
@@ -247,7 +267,19 @@ __all__ = [
     "start_span",
     "trace",
     "add_trace",
+    "log_trace",
     "update_current_trace",
+    # Assessment APIs
+    "delete_expectation",
+    "delete_feedback",
+    "log_expectation",
+    "log_feedback",
+    "update_expectation",
+    "update_feedback",
+    # Prompt Registry APIs
+    "delete_prompt",
+    "load_prompt",
+    "register_prompt",
 ]
 
 
