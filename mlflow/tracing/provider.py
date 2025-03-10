@@ -11,6 +11,7 @@ import contextvars
 import functools
 import json
 import logging
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Optional
 
 from opentelemetry import context as context_api
@@ -19,7 +20,7 @@ from opentelemetry.sdk.trace import TracerProvider
 
 from mlflow.exceptions import MlflowException, MlflowTracingException
 from mlflow.tracing.constant import SpanAttributeKey
-from mlflow.tracing.destination import MlflowExperiment, TraceDestination
+from mlflow.tracing.destination import Databricks, MlflowExperiment, TraceDestination
 from mlflow.tracing.utils.exception import raise_as_trace_exception
 from mlflow.tracing.utils.once import Once
 from mlflow.tracing.utils.otlp import get_otlp_exporter, should_use_otlp_exporter
@@ -95,6 +96,34 @@ def start_detached_span(
     if experiment_id:
         attributes[SpanAttributeKey.EXPERIMENT_ID] = json.dumps(experiment_id)
     return tracer.start_span(name, context=context, attributes=attributes, start_time=start_time_ns)
+
+
+@contextmanager
+def safe_set_span_in_context(span: "Span"):
+    """
+    A context manager that sets the given OpenTelemetry span as the active span in the current
+    context.
+
+    Args:
+        span: An MLflow span object to set as the active span.
+
+    Example:
+
+    .. code-block:: python
+
+        import mlflow
+
+
+        with mlflow.start_span("my_span") as span:
+            span.set_attribute("my_key", "my_value")
+
+        # The span is automatically detached from the context when the context manager exits.
+    """
+    token = set_span_in_context(span)
+    try:
+        yield
+    finally:
+        detach_span_from_context(token)
 
 
 def set_span_in_context(span: "Span") -> contextvars.Token:
@@ -215,12 +244,22 @@ def _setup_tracer_provider(disabled=False):
                 exporter, client, _MLFLOW_TRACE_USER_DESTINATION.experiment_id
             )
 
+        elif isinstance(_MLFLOW_TRACE_USER_DESTINATION, Databricks):
+            from mlflow.tracing.export.databricks import DatabricksSpanExporter
+            from mlflow.tracing.processor.databricks import DatabricksSpanProcessor
+
+            exporter = DatabricksSpanExporter()
+            processor = DatabricksSpanProcessor(
+                span_exporter=exporter, experiment_id=_MLFLOW_TRACE_USER_DESTINATION.experiment_id
+            )
+
+        # TODO: Remove this branch once we fully migrate to the new tracing server
         else:
-            from mlflow.tracing.export.databricks_agent import DatabricksAgentSpanExporter
-            from mlflow.tracing.processor.databricks_agent import DatabricksAgentSpanProcessor
+            from mlflow.tracing.export.databricks_agent_legacy import DatabricksAgentSpanExporter
+            from mlflow.tracing.processor.databricks import DatabricksSpanProcessor
 
             exporter = DatabricksAgentSpanExporter(_MLFLOW_TRACE_USER_DESTINATION)
-            processor = DatabricksAgentSpanProcessor(exporter)
+            processor = DatabricksSpanProcessor(span_exporter=exporter, experiment_id=None)
 
     elif should_use_otlp_exporter():
         # Export to OpenTelemetry Collector when configured
@@ -253,7 +292,7 @@ def _setup_tracer_provider(disabled=False):
     tracer_provider.add_span_processor(processor)
     _MLFLOW_TRACER_PROVIDER = tracer_provider
 
-    from mlflow.tracing.utils.token import suppress_token_detach_warning_to_debug_level
+    from mlflow.tracing.utils.warning import suppress_warning
 
     # Demote the "Failed to detach context" log raised by the OpenTelemetry logger to DEBUG
     # level so that it does not show up in the user's console. This warning may indicate
@@ -262,7 +301,12 @@ def _setup_tracer_provider(disabled=False):
     # Note that we need to apply it permanently rather than just the scope of prediction call,
     # because the exception can happen for streaming case, where the error log might be
     # generated when the iterator is consumed and we don't know when it will happen.
-    suppress_token_detach_warning_to_debug_level()
+    suppress_warning("opentelemetry.context", "Failed to detach context")
+
+    # These Otel warnings are occasionally raised in a valid case, e.g. we timeout a trace
+    # but some spans are still active. We suppress them because they are not actionable.
+    suppress_warning("opentelemetry.sdk.trace", "Setting attribute on ended span")
+    suppress_warning("opentelemetry.sdk.trace", "Calling end() on an ended span")
 
 
 @raise_as_trace_exception
