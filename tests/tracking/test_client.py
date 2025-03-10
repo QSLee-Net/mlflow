@@ -1,4 +1,3 @@
-import json
 import os
 import pickle
 import sys
@@ -26,6 +25,7 @@ from mlflow.entities import (
 from mlflow.entities.metric import Metric
 from mlflow.entities.model_registry import ModelVersion, ModelVersionTag
 from mlflow.entities.model_registry.model_version_status import ModelVersionStatus
+from mlflow.entities.model_registry.prompt import IS_PROMPT_TAG_KEY
 from mlflow.entities.param import Param
 from mlflow.entities.trace_status import TraceStatus
 from mlflow.environment_variables import MLFLOW_TRACKING_USERNAME
@@ -46,6 +46,7 @@ from mlflow.tracking._model_registry.utils import (
     _get_store_registry as _get_model_registry_store_registry,
 )
 from mlflow.tracking._tracking_service.utils import _register, _use_tracking_uri
+from mlflow.tracking.default_experiment import DEFAULT_EXPERIMENT_ID
 from mlflow.utils.databricks_utils import _construct_databricks_run_url
 from mlflow.utils.mlflow_tags import (
     MLFLOW_GIT_COMMIT,
@@ -202,7 +203,7 @@ def test_client_get_trace(mock_store, mock_artifact_repo):
         ],
     }
     trace = MlflowClient().get_trace("1234567")
-    mock_store.get_trace_info.assert_called_once_with("1234567")
+    mock_store.get_trace_info.assert_called_once_with("1234567", should_query_v3=False)
     mock_artifact_repo.download_trace_data.assert_called_once()
 
     assert trace.info.request_id == "tr-1234567"
@@ -826,6 +827,12 @@ def test_log_trace(tracking_uri):
     assert backend_traces[0].data.response == trace.data.response
     assert len(backend_traces[0].data.spans) == len(trace.data.spans)
     assert backend_traces[0].data.spans[0].name == trace.data.spans[0].name
+
+    # If the experiment ID is None in the given trace, it should be set to the default experiment
+    trace.info.experiment_id = None
+    new_request_id = client._log_trace(trace)
+    backend_traces = client.search_traces(experiment_ids=[DEFAULT_EXPERIMENT_ID])
+    assert len(backend_traces) == 1
 
 
 def test_ignore_exception_from_tracing_logic(monkeypatch, async_logging_enabled):
@@ -1610,76 +1617,139 @@ def test_file_store_download_upload_trace_data(tmp_path):
         assert trace_data.response == trace.data.response
 
 
-def test_store_trace_spans_tag():
-    client = MlflowClient()
+@pytest.fixture(params=["file", "sqlalchemy"])
+def registry_uri(request, tmp_path):
+    """Set an MLflow Model Registry URI with different type of backend."""
+    if "MLFLOW_SKINNY" in os.environ and request.param == "sqlalchemy":
+        pytest.skip("SQLAlchemy store is not available in skinny.")
 
-    trace_spans_tag_value = {
-        "name": "test",
-        "type": "UNKNOWN",
-        "inputs": ["test"],
-        "outputs": ["result"],
-    }
+    original_registry_uri = mlflow.get_registry_uri()
 
-    with mock.patch(
-        "mlflow.tracking._tracking_service.client.TrackingServiceClient.set_trace_tag",
-    ) as mock_set_trace_tag:
-        span = client.start_trace("test", inputs={"test": 1})
-        client.end_trace(span.request_id, outputs={"result": 2})
-        mock_set_trace_tag.assert_called_once()
-        assert mock_set_trace_tag.call_args[0][0] == span.request_id
-        assert mock_set_trace_tag.call_args[0][1] == "mlflow.traceSpans"
-        result = json.loads(mock_set_trace_tag.call_args[0][2])
-        for key in trace_spans_tag_value:
-            assert result[0][key] == trace_spans_tag_value[key]
+    if request.param == "file":
+        tracking_uri = tmp_path.joinpath("file").as_uri()
+    elif request.param == "sqlalchemy":
+        path = tmp_path.joinpath("sqlalchemy.db").as_uri()
+        tracking_uri = ("sqlite://" if sys.platform == "win32" else "sqlite:////") + path[
+            len("file://") :
+        ]
 
+    yield tracking_uri
 
-def test_store_trace_span_tag_when_not_dict_input_outputs():
-    client = MlflowClient()
-
-    with mock.patch(
-        "mlflow.tracking._tracking_service.client.TrackingServiceClient.set_trace_tag",
-    ) as mock_set_trace_tag:
-        span = client.start_trace("trace_name", inputs="test")
-        client.end_trace(span.request_id, outputs={"result": 2})
-        mock_set_trace_tag.assert_called_once()
-        assert mock_set_trace_tag.call_args[0][0] == span.request_id
-        assert mock_set_trace_tag.call_args[0][1] == "mlflow.traceSpans"
-        result = json.loads(mock_set_trace_tag.call_args[0][2])
-        assert result[0]["name"] == "trace_name"
-        assert result[0]["type"] == "UNKNOWN"
-        assert result[0]["outputs"] == ["result"]
-        assert "inputs" not in result[0]
-
-    with mock.patch(
-        "mlflow.tracking._tracking_service.client.TrackingServiceClient.set_trace_tag",
-    ) as mock_set_trace_tag:
-        span = client.start_trace("trace_name", inputs="{'input': 2}")
-        client.end_trace(span.request_id, outputs="result")
-        mock_set_trace_tag.assert_called_once()
-        assert mock_set_trace_tag.call_args[0][0] == span.request_id
-        assert mock_set_trace_tag.call_args[0][1] == "mlflow.traceSpans"
-        result = json.loads(mock_set_trace_tag.call_args[0][2])
-        assert result[0]["name"] == "trace_name"
-        assert result[0]["type"] == "UNKNOWN"
-        assert "outputs" not in result[0]
-        assert "inputs" not in result[0]
+    # Reset tracking URI
+    mlflow.set_tracking_uri(original_registry_uri)
 
 
-# when JSON is too large, we skip logging the tag. The trace should still be logged.
-def test_store_trace_span_tag_when_exception_raised():
-    client = MlflowClient()
+def test_crud_prompts(tracking_uri):
+    client = MlflowClient(tracking_uri=tracking_uri)
 
-    with (
-        mock.patch(
-            "mlflow.tracking._tracking_service.client.TrackingServiceClient._upload_trace_data"
-        ) as mock_upload_trace_data,
-        mock.patch(
-            "mlflow.tracking._tracking_service.client.TrackingServiceClient.set_trace_tag",
-            side_effect=MlflowException("Failed to log parameters"),
-        ) as mock_set_trace_tag,
-    ):
-        # This should not raise an exception
-        span = client.start_trace("trace_name", inputs={"input": "a" * 1000000})
-        client.end_trace(span.request_id, outputs={"result": "b" * 1000000})
-        mock_set_trace_tag.assert_called_once()
-        mock_upload_trace_data.assert_called_once()
+    client.register_prompt(
+        name="prompt_1",
+        template="Hi, {{title}} {{name}}! How are you today?",
+        description="A friendly greeting",
+        tags={"model": "my-model"},
+    )
+
+    prompt = client.load_prompt("prompt_1")
+    assert prompt.name == "prompt_1"
+    assert prompt.template == "Hi, {{title}} {{name}}! How are you today?"
+    assert prompt.description == "A friendly greeting"
+    assert prompt.tags == {"model": "my-model"}
+
+    client.register_prompt(
+        name="prompt_1",
+        template="Hi, {{title}} {{name}}! What's up?",
+        description="New greeting",
+    )
+
+    prompt = client.load_prompt("prompt_1")
+    assert prompt.template == "Hi, {{title}} {{name}}! What's up?"
+
+    prompt = client.load_prompt("prompt_1", version=1)
+    assert prompt.template == "Hi, {{title}} {{name}}! How are you today?"
+
+    prompt = client.load_prompt("prompts:/prompt_1/2")
+    assert prompt.template == "Hi, {{title}} {{name}}! What's up?"
+
+    # Delete prompt must be called with a version
+    with pytest.raises(TypeError, match=r"delete_prompt\(\) missing 1"):
+        client.delete_prompt("prompt_1")
+
+    client.delete_prompt("prompt_1", version=2)
+
+    with pytest.raises(MlflowException, match=r"Prompt (.*) with version 2 not found"):
+        client.load_prompt("prompt_1", version=2)
+
+    client.delete_prompt("prompt_1", version=1)
+
+
+@pytest.mark.parametrize("registry_uri", ["databricks", "databricks-uc", "uc://localhost:5000"])
+def test_crud_prompt_on_unsupported_registry(registry_uri):
+    client = MlflowClient(registry_uri=registry_uri)
+
+    with pytest.raises(MlflowException, match=r"The 'register_prompt' API is not supported"):
+        client.register_prompt(
+            name="prompt_1",
+            template="Hi, {{title}} {{name}}! How are you today?",
+            description="A friendly greeting",
+            tags={"model": "my-model"},
+        )
+
+    with pytest.raises(MlflowException, match=r"The 'load_prompt' API is not supported"):
+        client.load_prompt("prompt_1")
+
+    with pytest.raises(MlflowException, match=r"The 'delete_prompt' API is not supported"):
+        client.delete_prompt("prompt_1")
+
+
+def test_block_create_model_with_prompt_tag(tracking_uri):
+    client = MlflowClient(tracking_uri=tracking_uri)
+
+    with pytest.raises(MlflowException, match=r"Prompts cannot be registered"):
+        client.create_registered_model(
+            name="model",
+            tags={IS_PROMPT_TAG_KEY: "true"},
+        )
+
+    with pytest.raises(MlflowException, match=r"Prompts cannot be registered"):
+        client.create_model_version(
+            name="model",
+            source="source",
+            tags={IS_PROMPT_TAG_KEY: "false"},
+        )
+
+
+def test_block_create_prompt_with_existing_model_name(tracking_uri):
+    client = MlflowClient(tracking_uri=tracking_uri)
+
+    client.create_registered_model("model")
+
+    with pytest.raises(MlflowException, match=r"Model 'model' exists with"):
+        client.register_prompt(
+            name="model",
+            template="Hi, {{title}} {{name}}! How are you today?",
+            description="A friendly greeting",
+            tags={"model": "my-model"},
+        )
+
+
+def test_log_and_detach_prompt(tracking_uri):
+    client = MlflowClient(tracking_uri=tracking_uri)
+
+    client.register_prompt(name="p1", template="Hi, there!")
+    time.sleep(0.001)  # To avoid timestamp precision issue in Windows
+    client.register_prompt(name="p2", template="Hi, {{name}}!")
+
+    run_id = client.create_run(experiment_id="0").info.run_id
+    assert client.list_logged_prompts(run_id) == []
+
+    client.log_prompt(run_id, "prompts:/p1/1")
+    prompts = client.list_logged_prompts(run_id)
+    assert [p.name for p in prompts] == ["p1"]
+
+    client.log_prompt(run_id, "prompts:/p2/1")
+    prompts = client.list_logged_prompts(run_id)
+    assert [p.name for p in prompts] == ["p2", "p1"]
+
+    client.detach_prompt_from_run(run_id, "prompts:/p1/1")
+    prompts = client.list_logged_prompts(run_id)
+    assert [p.name for p in prompts] == ["p2"]
